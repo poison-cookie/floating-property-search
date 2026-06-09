@@ -1,12 +1,13 @@
 ﻿// ==UserScript==
 // @name         Floating Property Search
 // @namespace    https://local/floating-property-search
-// @version      0.8.2
+// @version      0.8.3
 // @description  Focus, fill, or submit a configured property search field from anywhere on the same site.
 // @match        *://*/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM_addValueChangeListener
 // @grant        GM_registerMenuCommand
 // @run-at       document-idle
 // ==/UserScript==
@@ -25,10 +26,19 @@
   const SHORTCUTS_KEY = `${STORAGE_PREFIX}.shortcuts.v1`;
   const MODE_KEY = `${STORAGE_PREFIX}.mode.v1`;
   const MANAGER_BUTTON_POSITION_KEY = `${STORAGE_PREFIX}.managerButtonPosition.v1`;
+  const TAB_ID_KEY = `${STORAGE_PREFIX}.tabId.v1`;
+  const STORAGE_SYNC_KEYS = [
+    CUSTOM_CONFIGS_KEY,
+    DISABLED_SITES_KEY,
+    SHORTCUTS_KEY,
+    MODE_KEY,
+    MANAGER_BUTTON_POSITION_KEY,
+  ];
   const PENDING_FOCUS_TTL_MS = 10 * 60 * 1000;
   const PENDING_KEYWORD_TTL_MS = 10 * 60 * 1000;
   const FOCUS_RETRY_COUNT = 24;
   const FOCUS_RETRY_INTERVAL_MS = 150;
+  const TAB_ID = getTabId();
 
   const bundledSiteConfigs = [
     {
@@ -483,6 +493,7 @@
   updateManagerButtonState();
   updateFloatingFormState();
   registerMenuCommands();
+  registerStorageSync();
 
   managerButton.addEventListener('pointerdown', startManagerButtonDrag);
   managerButton.addEventListener('click', (event) => {
@@ -554,6 +565,33 @@
       writeValue(SHORTCUTS_KEY, { enabled: shortcutsEnabled });
       window.alert(`Ctrl + /: ${shortcutsEnabled ? '有効' : '無効'}`);
     });
+  }
+
+  // 他タブで保存された設定変更を現在タブへ反映する。
+  function registerStorageSync() {
+    if (typeof GM_addValueChangeListener === 'function') {
+      STORAGE_SYNC_KEYS.forEach((key) => {
+        GM_addValueChangeListener(key, (_key, _oldValue, _newValue, remote) => {
+          if (remote === false) return;
+          refreshFromStorage();
+        });
+      });
+    }
+
+    window.addEventListener('storage', (event) => {
+      if (event.key !== null && !STORAGE_SYNC_KEYS.includes(event.key)) return;
+      refreshFromStorage();
+    });
+  }
+
+  // 保存領域から状態を読み直し、表示中UIへ反映する。
+  function refreshFromStorage() {
+    reloadState();
+    managerButtonPosition = loadManagerButtonPosition();
+    applyManagerButtonPosition();
+    updateManagerButtonState();
+    updateFloatingFormState();
+    if (!manager.hidden) renderManager();
   }
 
   // 設定モーダルを開き、表示前に状態を最新化する。
@@ -754,7 +792,7 @@
         return;
       }
       if (!window.confirm(`${config.name} の設定を削除しますか？`)) return;
-      customSiteConfigs = customSiteConfigs.filter((item) => item.id !== config.id);
+      customSiteConfigs = loadCustomSiteConfigs().filter((item) => item.id !== config.id);
       writeValue(CUSTOM_CONFIGS_KEY, customSiteConfigs);
       managerEditingConfigId = '';
       reloadState();
@@ -928,7 +966,8 @@
 
     if (!normalized) return { ok: false, message: '検索ページURL、対象ホスト、セレクタを確認してください。' };
 
-    customSiteConfigs = customSiteConfigs.filter((config) => config.id !== normalized.id && config.host !== normalized.host);
+    customSiteConfigs = loadCustomSiteConfigs()
+      .filter((config) => config.id !== normalized.id && config.host !== normalized.host);
     customSiteConfigs.unshift(normalized);
     writeValue(CUSTOM_CONFIGS_KEY, customSiteConfigs);
     setConfigDisabled(normalized.id, !values.enabled);
@@ -1007,7 +1046,7 @@
 
   // ページ遷移後に保留中のフォーカス要求があれば実行する。
   function maybeFocusFromPending(config) {
-    const pending = readValue(PENDING_FOCUS_KEY, null);
+    const pending = readPendingRequest(PENDING_FOCUS_KEY, PENDING_FOCUS_TTL_MS);
     if (!pending) return;
 
     const valid =
@@ -1017,13 +1056,13 @@
 
     if (!valid) return;
 
-    deleteValue(PENDING_FOCUS_KEY);
+    consumePendingRequest(PENDING_FOCUS_KEY);
     retryFocus(config);
   }
 
   // ページ遷移後に保留中の検索語句があればinputへ反映する。
   function maybeApplyPendingKeyword(config) {
-    const pending = readValue(PENDING_KEYWORD_KEY, null);
+    const pending = readPendingRequest(PENDING_KEYWORD_KEY, PENDING_KEYWORD_TTL_MS);
     if (!pending) return;
 
     const valid =
@@ -1035,7 +1074,7 @@
 
     if (!valid) return;
 
-    deleteValue(PENDING_KEYWORD_KEY);
+    consumePendingRequest(PENDING_KEYWORD_KEY);
     retryApplyKeyword(config, pending.keyword.trim());
   }
 
@@ -1359,7 +1398,7 @@
 
   // ページ遷移後にフォーカスするための保留状態を保存する。
   function savePendingFocus(config) {
-    writeValue(PENDING_FOCUS_KEY, {
+    writePendingRequest(PENDING_FOCUS_KEY, {
       configId: config.id,
       createdAt: Date.now(),
     });
@@ -1367,11 +1406,75 @@
 
   // ページ遷移後に入力する検索語句を保存する。
   function savePendingKeyword(config, keyword) {
-    writeValue(PENDING_KEYWORD_KEY, {
+    writePendingRequest(PENDING_KEYWORD_KEY, {
       configId: config.id,
       keyword,
       createdAt: Date.now(),
     });
+  }
+
+  // 現在タブ専用の保留リクエストを保存する。
+  function writePendingRequest(key, request) {
+    writeValue(getPendingTabKey(key), {
+      ...request,
+      tabId: TAB_ID,
+      requestId: createRequestId(),
+    });
+  }
+
+  // 現在タブの保留リクエストだけを読み、期限切れは掃除する。
+  function readPendingRequest(key, ttlMs) {
+    const tabKey = getPendingTabKey(key);
+    const pending = readValue(tabKey, null) || readLegacyPendingRequest(key);
+    if (!pending) return null;
+
+    const now = Date.now();
+    if (now - Number(pending.createdAt || 0) > ttlMs) {
+      deleteValue(tabKey);
+      return null;
+    }
+    return pending;
+  }
+
+  // 現在タブの保留リクエストだけを消費済みにする。
+  function consumePendingRequest(key) {
+    deleteValue(getPendingTabKey(key));
+    deleteValue(key);
+  }
+
+  // 旧形式の保留リクエストを現在タブ向けなら読み取る。
+  function readLegacyPendingRequest(key) {
+    const saved = readValue(key, {});
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return null;
+    if (!saved.configId && !saved.keyword) return null;
+    if (saved.tabId && saved.tabId !== TAB_ID) return null;
+    return saved;
+  }
+
+  // 保留リクエスト用のタブ専用キーを作る。
+  function getPendingTabKey(key) {
+    return `${key}.${TAB_ID}`;
+  }
+
+  // タブ内で維持する一意IDを取得する。
+  function getTabId() {
+    try {
+      const existing = window.sessionStorage.getItem(TAB_ID_KEY);
+      if (existing) return existing;
+      const next = createRequestId();
+      window.sessionStorage.setItem(TAB_ID_KEY, next);
+      return next;
+    } catch (error) {
+      return createRequestId();
+    }
+  }
+
+  // リクエスト識別用の短い一意IDを生成する。
+  function createRequestId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return window.crypto.randomUUID();
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   }
 
   // カスタム設定と組み込み設定を優先順で結合する。
@@ -1508,9 +1611,10 @@
 
   // サイト設定の有効/無効状態を保存する。
   function setConfigDisabled(configId, disabled) {
+    const latestDisabledSites = loadDisabledSites();
     disabledSites = disabled
-      ? uniqueNonEmpty(disabledSites.concat(configId))
-      : disabledSites.filter((id) => id !== configId);
+      ? uniqueNonEmpty(latestDisabledSites.concat(configId))
+      : latestDisabledSites.filter((id) => id !== configId);
     writeValue(DISABLED_SITES_KEY, disabledSites);
   }
 
