@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         Floating Property Search
 // @namespace    https://local/floating-property-search
-// @version      0.8.3
+// @version      0.8.5
 // @description  Focus, fill, or submit a configured property search field from anywhere on the same site.
 // @match        *://*/*
 // @grant        GM_getValue
@@ -23,6 +23,7 @@
   const DISABLED_SITES_KEY = `${STORAGE_PREFIX}.disabledSites.v1`;
   const PENDING_FOCUS_KEY = `${STORAGE_PREFIX}.pendingFocus.v1`;
   const PENDING_KEYWORD_KEY = `${STORAGE_PREFIX}.pendingKeyword.v1`;
+  const PENDING_INDEX_KEY = `${STORAGE_PREFIX}.pendingIndex.v1`;
   const SHORTCUTS_KEY = `${STORAGE_PREFIX}.shortcuts.v1`;
   const MODE_KEY = `${STORAGE_PREFIX}.mode.v1`;
   const MANAGER_BUTTON_POSITION_KEY = `${STORAGE_PREFIX}.managerButtonPosition.v1`;
@@ -90,6 +91,7 @@
   let currentConfig = findCurrentConfig();
   let managerEditingConfigId = currentConfig?.id || '';
   let managerFlashMessage = null;
+  let managerHasUnsavedChanges = false;
 
   const uiHost = document.createElement('div');
   uiHost.id = 'floating-property-search-ui-host';
@@ -265,6 +267,21 @@
       margin: 0 0 12px;
       font-size: 15px;
       line-height: 1.3;
+    }
+    .fps-manual-list {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding-left: 18px;
+      color: #374151;
+      font-size: 13px;
+    }
+    .fps-manual-list strong {
+      color: #111827;
+    }
+    .fps-manual-grid {
+      display: grid;
+      gap: 10px;
     }
     .fps-grid {
       display: grid;
@@ -494,6 +511,7 @@
   updateFloatingFormState();
   registerMenuCommands();
   registerStorageSync();
+  cleanupExpiredPendingRequests();
 
   managerButton.addEventListener('pointerdown', startManagerButtonDrag);
   managerButton.addEventListener('click', (event) => {
@@ -591,7 +609,12 @@
     applyManagerButtonPosition();
     updateManagerButtonState();
     updateFloatingFormState();
-    if (!manager.hidden) renderManager();
+    if (manager.hidden) return;
+    if (managerHasUnsavedChanges) {
+      showManagerSyncNotice('他タブで設定が変更されました。入力中の内容は保持しています。保存時に最新版へマージします。');
+      return;
+    }
+    renderManager();
   }
 
   // 設定モーダルを開き、表示前に状態を最新化する。
@@ -608,10 +631,35 @@
   function closeManager(event) {
     if (event && event.target !== manager) return;
     manager.hidden = true;
+    managerHasUnsavedChanges = false;
+  }
+
+  // 設定フォームに未保存変更があることを記録する。
+  function markManagerDirty() {
+    managerHasUnsavedChanges = true;
+  }
+
+  // 設定UIを再描画せず、他タブ同期の通知だけを表示する。
+  function showManagerSyncNotice(message) {
+    const panel = manager.querySelector('.fps-panel');
+    if (!panel) return;
+    let notice = panel.querySelector('.fps-sync-notice');
+    if (!notice) {
+      notice = document.createElement('div');
+      notice.className = 'fps-status fps-sync-notice';
+      const body = panel.querySelector('.fps-body');
+      if (body) {
+        body.prepend(notice);
+      } else {
+        panel.appendChild(notice);
+      }
+    }
+    setStatus(notice, message, 'error');
   }
 
   // 設定モーダル全体のDOMを再描画する。
   function renderManager() {
+    managerHasUnsavedChanges = false;
     manager.textContent = '';
 
     const panel = document.createElement('div');
@@ -644,6 +692,7 @@
     const body = document.createElement('div');
     body.className = 'fps-body';
     body.append(
+      createManualSection(),
       createSiteRegistrationSection(),
       createBehaviorSection(),
       createConfigListSection(),
@@ -654,10 +703,44 @@
     manager.appendChild(panel);
   }
 
+  // 設定画面内に機能マニュアルを表示する。
+  function createManualSection() {
+    const section = createSection('マニュアル');
+    const wrap = document.createElement('div');
+    wrap.className = 'fps-manual-grid';
+
+    const overview = document.createElement('ul');
+    overview.className = 'fps-manual-list';
+    [
+      ['基本', 'サイトごとに検索ページURLと対象inputを登録し、画面左下のフローティングフォームから検索します。'],
+      ['検索', '検索語句を入力して Enter または検索ボタンを押すと、検索ページへ移動して対象inputへ値を反映します。'],
+      ['候補', '候補表示は mansion-autocomplete.user.js をそのまま利用します。このスクリプト側では候補を独自生成しません。'],
+      ['ショートカット', 'Ctrl + / は、フォーカスモードでは対象フォームへ移動し、フローティングモードでは小フォームへフォーカスします。'],
+      ['複数タブ', '検索待ち状態はタブごとに分離されるため、別タブの検索語句で上書きされにくくなっています。'],
+      ['基準テスト', '社内テストでは、まず https://higashi-kochi.jp/ から宿泊検索への遷移を確認してください。'],
+    ].forEach(([label, text]) => {
+      const item = document.createElement('li');
+      const strong = document.createElement('strong');
+      strong.textContent = `${label}: `;
+      item.append(strong, text);
+      overview.appendChild(item);
+    });
+
+    const note = document.createElement('p');
+    note.className = 'fps-note';
+    note.textContent = '設定を変更したら「フォーカステスト」で対象inputが取れるか確認してください。候補が出ない場合は mansion-autocomplete.user.js が有効か確認し、必要に応じてページを再読み込みしてください。';
+
+    wrap.append(overview, note);
+    section.appendChild(wrap);
+    return section;
+  }
+
   // 現在サイトまたは選択中サイトの登録・編集フォームを作る。
   function createSiteRegistrationSection() {
     const config = getManagerFormConfig();
     const section = createSection('サイト登録・編集');
+    section.addEventListener('input', markManagerDirty);
+    section.addEventListener('change', markManagerDirty);
     const grid = document.createElement('div');
     grid.className = 'fps-grid';
 
@@ -723,6 +806,7 @@
         setStatus(status, result.message, 'error');
         return;
       }
+      managerHasUnsavedChanges = false;
       managerEditingConfigId = result.config.id;
       reloadState();
       updateManagerButtonState();
@@ -973,11 +1057,14 @@
     setConfigDisabled(normalized.id, !values.enabled);
     const diagnostics = diagnoseConfigOnCurrentPage(normalized);
     const warning = !diagnostics.ok && isSearchPage(normalized);
+    const message = warning
+      ? `保存しました。ただし現在の検索ページでは動作確認に失敗しています。\n${formatDiagnostics(diagnostics)}`
+      : '保存しました。';
     return {
       ok: true,
       warning,
       config: normalized,
-      message: warning ? `保存しました。ただし確認が必要です。\n${formatDiagnostics(diagnostics)}` : '保存しました。',
+      message,
     };
   }
 
@@ -1415,11 +1502,13 @@
 
   // 現在タブ専用の保留リクエストを保存する。
   function writePendingRequest(key, request) {
-    writeValue(getPendingTabKey(key), {
+    const tabKey = getPendingTabKey(key);
+    writeValue(tabKey, {
       ...request,
       tabId: TAB_ID,
       requestId: createRequestId(),
     });
+    rememberPendingKey(tabKey);
   }
 
   // 現在タブの保留リクエストだけを読み、期限切れは掃除する。
@@ -1431,6 +1520,7 @@
     const now = Date.now();
     if (now - Number(pending.createdAt || 0) > ttlMs) {
       deleteValue(tabKey);
+      forgetPendingKey(tabKey);
       return null;
     }
     return pending;
@@ -1438,8 +1528,10 @@
 
   // 現在タブの保留リクエストだけを消費済みにする。
   function consumePendingRequest(key) {
-    deleteValue(getPendingTabKey(key));
+    const tabKey = getPendingTabKey(key);
+    deleteValue(tabKey);
     deleteValue(key);
+    forgetPendingKey(tabKey);
   }
 
   // 旧形式の保留リクエストを現在タブ向けなら読み取る。
@@ -1454,6 +1546,60 @@
   // 保留リクエスト用のタブ専用キーを作る。
   function getPendingTabKey(key) {
     return `${key}.${TAB_ID}`;
+  }
+
+  // pending用キーを索引に追加する。
+  function rememberPendingKey(key) {
+    const keys = readPendingIndex();
+    if (keys.includes(key)) return;
+    writeValue(PENDING_INDEX_KEY, keys.concat(key));
+  }
+
+  // pending用キーを索引から外す。
+  function forgetPendingKey(key) {
+    const keys = readPendingIndex().filter((item) => item !== key);
+    if (keys.length) {
+      writeValue(PENDING_INDEX_KEY, keys);
+    } else {
+      deleteValue(PENDING_INDEX_KEY);
+    }
+  }
+
+  // pending索引を文字列配列として読む。
+  function readPendingIndex() {
+    const saved = readValue(PENDING_INDEX_KEY, []);
+    return Array.isArray(saved) ? uniqueNonEmpty(saved) : [];
+  }
+
+  // 期限切れのpendingリクエストを掃除する。
+  function cleanupExpiredPendingRequests() {
+    const keys = uniqueNonEmpty(readPendingIndex().concat(scanLocalPendingKeys()));
+    const kept = [];
+    keys.forEach((key) => {
+      const ttlMs = key.includes(PENDING_FOCUS_KEY) ? PENDING_FOCUS_TTL_MS : PENDING_KEYWORD_TTL_MS;
+      const pending = readValue(key, null);
+      if (!pending || typeof pending !== 'object' || Date.now() - Number(pending.createdAt || 0) > ttlMs) {
+        deleteValue(key);
+        return;
+      }
+      kept.push(key);
+    });
+
+    if (kept.length) {
+      writeValue(PENDING_INDEX_KEY, kept);
+    } else {
+      deleteValue(PENDING_INDEX_KEY);
+    }
+  }
+
+  // localStorageフォールバック時に残ったpendingキーを列挙する。
+  function scanLocalPendingKeys() {
+    try {
+      return Object.keys(window.localStorage)
+        .filter((key) => key.startsWith(`${PENDING_FOCUS_KEY}.`) || key.startsWith(`${PENDING_KEYWORD_KEY}.`));
+    } catch (error) {
+      return [];
+    }
   }
 
   // タブ内で維持する一意IDを取得する。
