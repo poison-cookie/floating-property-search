@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         Floating Property Search
 // @namespace    https://local/floating-property-search
-// @version      0.8.5
+// @version      0.8.9
 // @description  Focus, fill, or submit a configured property search field from anywhere on the same site.
 // @match        *://*/*
 // @grant        GM_getValue
@@ -26,6 +26,7 @@
   const PENDING_INDEX_KEY = `${STORAGE_PREFIX}.pendingIndex.v1`;
   const SHORTCUTS_KEY = `${STORAGE_PREFIX}.shortcuts.v1`;
   const MODE_KEY = `${STORAGE_PREFIX}.mode.v1`;
+  const FORM_VISIBILITY_KEY = `${STORAGE_PREFIX}.formVisibility.v1`;
   const MANAGER_BUTTON_POSITION_KEY = `${STORAGE_PREFIX}.managerButtonPosition.v1`;
   const TAB_ID_KEY = `${STORAGE_PREFIX}.tabId.v1`;
   const STORAGE_SYNC_KEYS = [
@@ -33,6 +34,7 @@
     DISABLED_SITES_KEY,
     SHORTCUTS_KEY,
     MODE_KEY,
+    FORM_VISIBILITY_KEY,
     MANAGER_BUTTON_POSITION_KEY,
   ];
   const PENDING_FOCUS_TTL_MS = 10 * 60 * 1000;
@@ -54,37 +56,13 @@
       submitSelector: 'input[name="btnSearch"]',
       readonly: true,
     },
-    {
-      id: 'yahoo-japan-search',
-      name: 'Yahoo! JAPAN',
-      host: 'www.yahoo.co.jp',
-      enabled: true,
-      searchPageUrl: 'https://www.yahoo.co.jp/',
-      inputName: 'p',
-      keywordSelector: 'input[name="p"]',
-      submitMode: 'button',
-      submitSelector: 'button[type="submit"]',
-      readonly: true,
-    },
-    {
-      id: 'musegirls-image-search',
-      name: 'MuseGirls 画像検索',
-      host: 'musegirls.club',
-      enabled: true,
-      searchPageUrl: 'https://musegirls.club/search/images/',
-      inputName: '',
-      keywordSelector: '#actress',
-      submitMode: 'none',
-      submitSelector: '',
-      suggestionSelectors: ['a.js-actress-filter'],
-      readonly: true,
-    },
   ];
 
   let customSiteConfigs = loadCustomSiteConfigs();
   let disabledSites = loadDisabledSites();
   let shortcutsEnabled = readValue(SHORTCUTS_KEY, { enabled: true }).enabled !== false;
   let operationMode = normalizeMode(readValue(MODE_KEY, { mode: 'focus' }).mode);
+  let formVisibility = normalizeFormVisibility(readValue(FORM_VISIBILITY_KEY, { visibility: 'always' }).visibility);
   let managerButtonPosition = loadManagerButtonPosition();
   let managerButtonDrag = null;
   let lastFocusedInputName = '';
@@ -263,10 +241,15 @@
       padding: 14px;
       background: #fff;
     }
-    .fps-section h3 {
+    .fps-section h3,
+    .fps-section-title {
       margin: 0 0 12px;
       font-size: 15px;
       line-height: 1.3;
+    }
+    .fps-section-title {
+      color: #111827;
+      font-weight: 700;
     }
     .fps-manual-list {
       display: grid;
@@ -282,6 +265,60 @@
     .fps-manual-grid {
       display: grid;
       gap: 10px;
+    }
+    .fps-manual-details {
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: #fff;
+    }
+    .fps-advanced-details {
+      display: block;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 14px;
+      background: #fff;
+    }
+    .fps-manual-details[open] {
+      background: #f9fafb;
+    }
+    .fps-manual-summary,
+    .fps-advanced-summary {
+      cursor: pointer;
+      padding: 10px 12px;
+      color: #111827;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.4;
+    }
+    .fps-advanced-summary {
+      margin: -14px;
+      padding: 14px;
+      font-size: 15px;
+    }
+    .fps-manual-summary:hover {
+      background: #f3f4f6;
+    }
+    .fps-advanced-summary:hover {
+      background: #f9fafb;
+    }
+    .fps-advanced-content {
+      display: grid;
+      gap: 10px;
+      padding-top: 14px;
+    }
+    .fps-manual-content {
+      display: grid;
+      gap: 10px;
+      padding: 0 12px 12px;
+    }
+    .fps-manual-subtitle {
+      margin: 0;
+      color: #374151;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .fps-manual-list + .fps-manual-subtitle {
+      margin-top: 2px;
     }
     .fps-grid {
       display: grid;
@@ -525,7 +562,12 @@
     submitFloatingSearch();
   });
   floatingInput.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') floatingInput.blur();
+    if (event.key !== 'Escape') return;
+    if (formVisibility === 'shortcut') {
+      closeFloatingForm();
+      return;
+    }
+    floatingInput.blur();
   });
   manager.addEventListener('mousedown', closeManager);
   document.addEventListener('focusin', handleDocumentFocusIn, true);
@@ -552,7 +594,7 @@
       if (!currentConfig || isConfigDisabled(currentConfig)) return;
       event.preventDefault();
       event.stopPropagation();
-      if (operationMode === 'floating') {
+      if (operationMode === 'floating' || formVisibility === 'shortcut') {
         openFloatingForm();
         return;
       }
@@ -709,30 +751,207 @@
     const wrap = document.createElement('div');
     wrap.className = 'fps-manual-grid';
 
-    const overview = document.createElement('ul');
-    overview.className = 'fps-manual-list';
-    [
-      ['基本', 'サイトごとに検索ページURLと対象inputを登録し、画面左下のフローティングフォームから検索します。'],
-      ['検索', '検索語句を入力して Enter または検索ボタンを押すと、検索ページへ移動して対象inputへ値を反映します。'],
-      ['候補', '候補表示は mansion-autocomplete.user.js をそのまま利用します。このスクリプト側では候補を独自生成しません。'],
-      ['ショートカット', 'Ctrl + / は、フォーカスモードでは対象フォームへ移動し、フローティングモードでは小フォームへフォーカスします。'],
-      ['複数タブ', '検索待ち状態はタブごとに分離されるため、別タブの検索語句で上書きされにくくなっています。'],
-      ['基準テスト', '社内テストでは、まず https://higashi-kochi.jp/ から宿泊検索への遷移を確認してください。'],
-    ].forEach(([label, text]) => {
-      const item = document.createElement('li');
-      const strong = document.createElement('strong');
-      strong.textContent = `${label}: `;
-      item.append(strong, text);
-      overview.appendChild(item);
+    const manualSections = [
+      {
+        title: '1. このツールでできること',
+        open: true,
+        groups: [
+          {
+            subtitle: '目的',
+            items: [
+              ['何をするものか', '管理会社や物件サイトごとに違う検索欄へ、画面左下の小さな検索フォームからすばやく検索語句を送ります。'],
+              ['手間が減る場面', '別ページにある検索欄まで移動したり、スクロールして検索欄を探したりする作業を減らせます。'],
+              ['自動化の範囲', '検索語句の入力、検索ページへの移動、検索ボタンのクリックまでを補助します。ログイン、CAPTCHA、結果の確認は自動化しません。'],
+            ],
+          },
+          {
+            subtitle: '重要な考え方',
+            items: [
+              ['サイト設定', '「このサイトでは、どのページの、どの検索欄を使うか」を登録したものです。サイトごとに1つずつ作ります。'],
+              ['対象input', '実際に文字を入れる検索欄です。設定がずれていると、検索語句を入れられません。'],
+              ['検索実行', '検索欄に文字を入れた後、何もしない、Enterを押す、指定ボタンを押す、のどれかを選びます。'],
+            ],
+          },
+        ],
+      },
+      {
+        title: '2. 普段の使い方',
+        groups: [
+          {
+            subtitle: 'フローティングフォームで検索する',
+            items: [
+              ['1', '対象サイトを開きます。登録済みで有効なサイトなら、画面左下に検索フォームが出ます。'],
+              ['2', '検索したい語句を入力します。例: 温泉、駅近、物件名、電話番号など。'],
+              ['3', 'Enter または「検索」ボタンを押します。'],
+              ['4', '登録された検索ページへ移動し、対象の検索欄に語句を入れます。設定によってはそのまま検索も実行します。'],
+            ],
+          },
+          {
+            subtitle: 'Ctrl + / を使う',
+            items: [
+              ['フォーカスモード', '登録済みの検索欄へ移動して、そこにカーソルを置きます。検索の実行は利用者が行います。'],
+              ['フローティングモード', '画面左下の検索フォームへカーソルを置きます。'],
+              ['時だけ表示', '検索フォーム表示を「Ctrl + / の時だけ表示」にすると、普段は非表示で、ショートカットを押した時だけ出ます。'],
+            ],
+          },
+          {
+            subtitle: '閉じ方',
+            items: [
+              ['設定画面', '右上の「閉じる」を押します。背景部分をクリックしても閉じます。'],
+              ['時だけ表示の検索フォーム', 'Escape を押すと閉じます。検索が完了した後も自動で閉じます。'],
+              ['常時表示の検索フォーム', 'Escape では入力欄のフォーカスだけ外れます。フォーム自体は表示されたままです。'],
+            ],
+          },
+        ],
+      },
+      {
+        title: '3. サイト登録・編集の入力項目',
+        groups: [
+          {
+            subtitle: '基本項目',
+            items: [
+              ['表示名', '設定一覧や検索フォームの説明に出る名前です。利用者が見て分かる名前にします。例: ひがしこうち旅 宿泊。'],
+              ['対象ホスト', 'この設定を使うサイトのドメインです。例: higashi-kochi.jp。https:// や /hotel/ は入れません。'],
+              ['検索ページURL', '検索欄が実際にあるページのURLです。どのページから検索しても、必要ならここへ移動します。'],
+            ],
+          },
+          {
+            subtitle: '検索欄の指定',
+            items: [
+              ['対象input name', '検索欄についている name の値です。分からない場合は、まず検索欄をクリックしてから設定画面を開くと自動で入ることがあります。'],
+              ['CSSセレクタ', '検索欄を探すための指定です。よく分からなければ input[name="keyword"] のような形を使います。'],
+              ['フォーカステスト', '保存前後に押してください。対象inputが見つかるか、見つからない場合は何が原因に近いかを表示します。'],
+            ],
+          },
+          {
+            subtitle: '検索実行',
+            items: [
+              ['検索実行しない', '検索欄に文字を入れるだけです。最後の検索ボタンは利用者が押します。初めてのサイトではこれが安全です。'],
+              ['Enterで検索実行', '検索欄に文字を入れた後、Enterキーを押した扱いにします。'],
+              ['指定ボタンをクリック', '検索欄に文字を入れた後、指定した検索ボタンをクリックします。'],
+              ['検索ボタンCSS', '「指定ボタンをクリック」を選んだ時だけ使います。ボタンを間違えると別の操作になるため、フォーカステストと実検索で確認してください。'],
+            ],
+          },
+        ],
+      },
+      {
+        title: '4. 動作設定',
+        groups: [
+          {
+            subtitle: '動作モード',
+            items: [
+              ['フォーカスモード', 'Ctrl + / でサイト本来の検索欄へ移動します。フローティングフォームを主に使わない運用向けです。'],
+              ['フローティングモード', 'Ctrl + / で画面左下の検索フォームへ移動します。どのページでも同じ小フォームから検索したい場合に使います。'],
+            ],
+          },
+          {
+            subtitle: '検索フォーム表示',
+            items: [
+              ['常時表示', '対象サイトを開いている間、画面左下に検索フォームを出します。検索頻度が高いサイト向けです。'],
+              ['Ctrl + / の時だけ表示', '普段は画面を邪魔しません。検索したい時だけ Ctrl + / で出します。'],
+            ],
+          },
+          {
+            subtitle: 'ショートカット',
+            items: [
+              ['有効', 'Ctrl + / が使えます。'],
+              ['無効', 'サイト側のショートカットとぶつかる場合に切ります。検索フォームが常時表示なら、ショートカットなしでも検索できます。'],
+            ],
+          },
+        ],
+      },
+      {
+        title: '5. 候補表示について',
+        groups: [
+          {
+            subtitle: 'このツール単体では候補を作らない',
+            items: [
+              ['役割分担', '候補表示は mansion-autocomplete.user.js をそのまま使います。このツールは候補データを作ったり管理したりしません。'],
+              ['候補を使う条件', 'mansion-autocomplete.user.js が同じブラウザで有効になっている必要があります。'],
+              ['候補が出ない時', 'ページを再読み込みしてください。それでも出ない場合は、mansion-autocomplete.user.js が有効か、対象サイトに対応しているかを確認してください。'],
+            ],
+          },
+          {
+            subtitle: '候補を選んだ後',
+            items: [
+              ['Enterの扱い', '候補を確定する Enter と、検索を送信する Enter が分かれる場合があります。候補を選んだ後、もう一度 Enter が必要なことがあります。'],
+              ['検索語句', '候補で確定された文字がフローティングフォームの入力値として送信されます。'],
+            ],
+          },
+        ],
+      },
+      {
+        title: '6. よくある確認・困った時',
+        groups: [
+          {
+            subtitle: '検索できない',
+            items: [
+              ['フォームが出ない', '対象ホストが今開いているサイトと合っているか、サイト設定が無効になっていないかを確認します。'],
+              ['文字が入らない', 'CSSセレクタが実際の検索欄に合っていない可能性があります。検索欄をクリックしてから設定画面を開き、フォーカステストを実行してください。'],
+              ['検索ボタンが押されない', '検索実行が「指定ボタンをクリック」になっている場合、検索ボタンCSSが正しいか確認します。迷う場合は一度「検索実行しない」に戻します。'],
+              ['別の検索欄に入る', 'CSSセレクタが広すぎます。input[name="keyword"] のように、できるだけ対象を絞った指定にします。'],
+            ],
+          },
+          {
+            subtitle: '複数タブ',
+            items: [
+              ['上書き対策', '検索待ちの語句はタブごとに分けて保存します。別タブで別の語句を検索しても混ざりにくい設計です。'],
+              ['設定変更', '他タブで設定を保存すると、開いているタブにも反映されます。設定画面で入力中の場合は、勝手に書き換えず通知だけ出します。'],
+            ],
+          },
+          {
+            subtitle: '確認の基準',
+            items: [
+              ['基準サイト', '社内テストでは、まず https://higashi-kochi.jp/ を開き、宿泊検索ページへ遷移できるか確認します。'],
+              ['テスト語句', '例として「温泉」を入力し、https://higashi-kochi.jp/hotel/ の keyword に入るかを確認します。'],
+              ['最後に見ること', '検索後、pending と呼ばれる一時保存データが残り続けないことを確認します。通常は検索後に消えます。'],
+            ],
+          },
+        ],
+      },
+    ];
+
+    manualSections.forEach((manualSection) => {
+      wrap.appendChild(createManualDetails(manualSection));
     });
 
-    const note = document.createElement('p');
-    note.className = 'fps-note';
-    note.textContent = '設定を変更したら「フォーカステスト」で対象inputが取れるか確認してください。候補が出ない場合は mansion-autocomplete.user.js が有効か確認し、必要に応じてページを再読み込みしてください。';
-
-    wrap.append(overview, note);
     section.appendChild(wrap);
     return section;
+  }
+
+  // マニュアルの大項目を開閉できるdetails要素として作る。
+  function createManualDetails(manualSection) {
+    const details = document.createElement('details');
+    details.className = 'fps-manual-details';
+    if (manualSection.open) details.open = true;
+
+    const summary = document.createElement('summary');
+    summary.className = 'fps-manual-summary';
+    summary.textContent = manualSection.title;
+
+    const content = document.createElement('div');
+    content.className = 'fps-manual-content';
+
+    manualSection.groups.forEach((group) => {
+      const subtitle = document.createElement('p');
+      subtitle.className = 'fps-manual-subtitle';
+      subtitle.textContent = group.subtitle;
+
+      const list = document.createElement('ul');
+      list.className = 'fps-manual-list';
+      group.items.forEach(([label, text]) => {
+        const item = document.createElement('li');
+        const strong = document.createElement('strong');
+        strong.textContent = `${label}: `;
+        item.append(strong, text);
+        list.appendChild(item);
+      });
+
+      content.append(subtitle, list);
+    });
+
+    details.append(summary, content);
+    return details;
   }
 
   // 現在サイトまたは選択中サイトの登録・編集フォームを作る。
@@ -870,11 +1089,7 @@
       renderManager();
     });
 
-    const deleteButton = createButton('このカスタム設定を削除', 'fps-button-danger', () => {
-      if (!config.custom) {
-        setStatus(status, '組み込み設定は削除できません。無効化はできます。', 'error');
-        return;
-      }
+    const deleteButton = config.custom ? createButton('このカスタム設定を削除', 'fps-button-danger', () => {
       if (!window.confirm(`${config.name} の設定を削除しますか？`)) return;
       customSiteConfigs = loadCustomSiteConfigs().filter((item) => item.id !== config.id);
       writeValue(CUSTOM_CONFIGS_KEY, customSiteConfigs);
@@ -883,9 +1098,10 @@
       updateManagerButtonState();
       updateFloatingFormState();
       renderManager();
-    });
+    }) : null;
 
-    actions.append(saveButton, currentPageButton, newButton, detectButton, testButton, deleteButton);
+    actions.append(saveButton, currentPageButton, newButton, detectButton, testButton);
+    if (deleteButton) actions.appendChild(deleteButton);
 
     const note = document.createElement('p');
     note.className = 'fps-note';
@@ -921,6 +1137,26 @@
 
     appendField(grid, '動作モード', modeSelect);
 
+    const visibilitySelect = document.createElement('select');
+    visibilitySelect.className = 'fps-select';
+    [
+      ['always', '常時表示'],
+      ['shortcut', 'Ctrl + / の時だけ表示'],
+    ].forEach(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      visibilitySelect.appendChild(option);
+    });
+    visibilitySelect.value = formVisibility;
+    visibilitySelect.addEventListener('change', () => {
+      formVisibility = normalizeFormVisibility(visibilitySelect.value);
+      writeValue(FORM_VISIBILITY_KEY, { visibility: formVisibility });
+      updateFloatingFormState();
+    });
+
+    appendField(grid, '検索フォーム表示', visibilitySelect);
+
     const shortcutInput = document.createElement('input');
     shortcutInput.type = 'checkbox';
     shortcutInput.checked = shortcutsEnabled;
@@ -941,7 +1177,7 @@
 
     const note = document.createElement('p');
     note.className = 'fps-note';
-    note.textContent = 'フローティングフォームは、入力語句を検索ページへ渡して指定inputにセットします。検索ボタンの自動クリックは行いません。';
+    note.textContent = 'フローティングフォームは、入力語句を検索ページへ渡して指定inputにセットします。検索実行の設定に応じて、Enter送信または検索ボタンのクリックも行います。';
 
     section.append(grid, note);
     return section;
@@ -990,7 +1226,20 @@
 
   // カスタム設定のJSON入出力UIを作る。
   function createMigrationSection() {
-    const section = createSection('JSON入出力');
+    const section = document.createElement('details');
+    section.className = 'fps-advanced-details';
+
+    const summary = document.createElement('summary');
+    summary.className = 'fps-advanced-summary';
+    summary.textContent = '上級者向け: 設定のバックアップ・復元';
+
+    const content = document.createElement('div');
+    content.className = 'fps-advanced-content';
+
+    const note = document.createElement('p');
+    note.className = 'fps-note';
+    note.textContent = '通常の登録・編集では使いません。複数のカスタム設定をまとめて移行したい時だけ開いてください。取り込み時は現在のカスタム設定が置き換わります。';
+
     const textarea = document.createElement('textarea');
     textarea.className = 'fps-textarea';
     textarea.spellcheck = false;
@@ -1028,7 +1277,8 @@
       })
     );
 
-    section.append(textarea, actions, status);
+    content.append(note, textarea, actions, status);
+    section.append(summary, content);
     return section;
   }
 
@@ -1110,7 +1360,8 @@
       if (input) {
         focusInput(input);
         setInputValue(input, keyword);
-        runConfiguredSubmit(currentConfig, input, { force: true });
+        runConfiguredSubmit(currentConfig, input);
+        closeFloatingFormIfShortcutOnly();
         return;
       }
       showFloatingMessage('対象inputが見つかりません。設定を確認してください。');
@@ -1175,7 +1426,7 @@
         window.clearInterval(timer);
         focusInput(input);
         setInputValue(input, keyword);
-        runConfiguredSubmit(config, input, { force: true });
+        runConfiguredSubmit(config, input);
         return;
       }
       if (count >= FOCUS_RETRY_COUNT) window.clearInterval(timer);
@@ -1370,8 +1621,8 @@
   }
 
   // サイト設定に従ってEnter送信またはボタンクリックを実行する。
-  function runConfiguredSubmit(config, input, options = {}) {
-    const submitMode = resolveSubmitMode(config, options);
+  function runConfiguredSubmit(config, input) {
+    const submitMode = resolveSubmitMode(config);
     if (submitMode === 'none') return;
 
     window.setTimeout(() => {
@@ -1392,12 +1643,9 @@
     }, 80);
   }
 
-  // 設定と強制実行オプションから実際の送信方法を決める。
-  function resolveSubmitMode(config, options = {}) {
-    const submitMode = normalizeSubmitMode(config.submitMode);
-    if (!options.force || submitMode !== 'none') return submitMode;
-    if (config.submitSelector) return 'button';
-    return 'enter';
+  // 設定から実際の送信方法を決める。
+  function resolveSubmitMode(config) {
+    return normalizeSubmitMode(config.submitMode);
   }
 
   // 対象inputへEnterキーイベント一式を送る。
@@ -1785,12 +2033,18 @@
     disabledSites = loadDisabledSites();
     shortcutsEnabled = readValue(SHORTCUTS_KEY, { enabled: true }).enabled !== false;
     operationMode = normalizeMode(readValue(MODE_KEY, { mode: 'focus' }).mode);
+    formVisibility = normalizeFormVisibility(readValue(FORM_VISIBILITY_KEY, { visibility: 'always' }).visibility);
     currentConfig = findCurrentConfig();
   }
 
   // 動作モードをfocus/floatingのいずれかに丸める。
   function normalizeMode(mode) {
     return mode === 'floating' ? 'floating' : 'focus';
+  }
+
+  // フォーム表示モードをalways/shortcutのいずれかに丸める。
+  function normalizeFormVisibility(visibility) {
+    return visibility === 'shortcut' ? 'shortcut' : 'always';
   }
 
   // 空文字を除去し重複を消した配列を返す。
@@ -1838,7 +2092,7 @@
 
     floatingInput.placeholder = `${currentConfig.name} を検索`;
     floatingNote.textContent = '';
-    floatingForm.hidden = false;
+    floatingForm.hidden = formVisibility !== 'always';
     hideFloatingSuggestions();
   }
 
@@ -1865,6 +2119,11 @@
   function closeFloatingForm() {
     hideFloatingSuggestions();
     floatingForm.hidden = true;
+  }
+
+  // ショートカット時のみ表示する設定ならフォームを閉じる。
+  function closeFloatingFormIfShortcutOnly() {
+    if (formVisibility === 'shortcut') closeFloatingForm();
   }
 
   // フローティングフォーム下部の一時メッセージを表示する。
